@@ -11,6 +11,7 @@ import (
 	"log"
 	"math/rand"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,7 +32,20 @@ type runABTestOptions struct {
 	DB1  *sql.DB
 	DB2  *sql.DB
 
+	TiFlashTables []string
+
 	Store Store
+}
+
+func (opts *runABTestOptions) TiFlashTablesForDB(i int) []string {
+	tbls := make([]string, 0, len(opts.TiFlashTables))
+	prefix := strconv.Itoa(i) + ":"
+	for _, t := range opts.TiFlashTables {
+		if strings.HasPrefix(t, prefix) {
+			tbls = append(tbls, strings.TrimPrefix(t, prefix))
+		}
+	}
+	return tbls
 }
 
 func runABTest(ctx context.Context, failed chan struct{}, opts runABTestOptions) error {
@@ -69,13 +83,13 @@ func runABTest(ctx context.Context, failed chan struct{}, opts runABTestOptions)
 		dbName1 := "db1__" + strings.ReplaceAll(t.ID, "-", "_")
 		dbName2 := "db2__" + strings.ReplaceAll(t.ID, "-", "_")
 
-		conn1, err1 := initTest(ctx, opts.DB1, dbName1, t)
+		conn1, err1 := initTest(ctx, opts.DB1, dbName1, t, opts.TiFlashTablesForDB(1))
 		if err1 != nil {
 			store.SetTest(t.ID, TestFailed, "init db1: "+err1.Error())
 			log.Printf("failed to init %s/%s: %v", opts.Tag1, dbName1, err1)
 			continue
 		}
-		conn2, err2 := initTest(ctx, opts.DB2, dbName2, t)
+		conn2, err2 := initTest(ctx, opts.DB2, dbName2, t, opts.TiFlashTablesForDB(2))
 		if err2 != nil {
 			conn1.Close()
 			store.SetTest(t.ID, TestFailed, "init db2: "+err2.Error())
@@ -125,7 +139,7 @@ func runABTest(ctx context.Context, failed chan struct{}, opts runABTestOptions)
 			if err1 != nil {
 				return fail(fmt.Errorf("check table of %s after txn #%d: %v", opts.Tag1, i, err1))
 			}
-			hs2, err2 := checkTables(ctx, opts.DB1, dbName2)
+			hs2, err2 := checkTables(ctx, opts.DB2, dbName2)
 			if err2 != nil {
 				return fail(fmt.Errorf("check table of %s after txn #%d: %v", opts.Tag2, i, err2))
 			}
@@ -145,7 +159,7 @@ func runABTest(ctx context.Context, failed chan struct{}, opts runABTestOptions)
 	return nil
 }
 
-func initTest(ctx context.Context, db *sql.DB, name string, t *Test) (conn *sql.Conn, err error) {
+func initTest(ctx context.Context, db *sql.DB, name string, t *Test, tiflashTbls []string) (conn *sql.Conn, err error) {
 	defer Return(&err)
 	conn = Try(sqlz.Connect(ctx, db)).(*sql.Conn)
 	Try(conn.ExecContext(ctx, "create database "+name))
@@ -154,6 +168,21 @@ func initTest(ctx context.Context, db *sql.DB, name string, t *Test) (conn *sql.
 		// it's ok for some of stmts in init_sql failed
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			log.Printf("init stmt failed: %v @ %s", err, stmt)
+		}
+	}
+	for _, tbl := range tiflashTbls {
+		avail := 0
+		for i := 0; i < 30; i++ {
+			e := conn.QueryRowContext(ctx, "select available from information_schema.tiflash_replica where table_schema = ? and table_name = ?", name, tbl).Scan(&avail)
+			if e != nil {
+				log.Printf("failed to select tiflash_replica: [%s] %v", tbl, e)
+				break
+			}
+			if avail > 0 {
+				break
+			}
+			log.Printf("waiting replication: [%s]", tbl)
+			time.Sleep(time.Second)
 		}
 	}
 	return

@@ -164,6 +164,7 @@ func runTestCmd(g *global) *cobra.Command {
 	cmd.Flags().StringVar(&dsn2, "dsn2", "", "dsn for 2nd database")
 	cmd.Flags().StringVar(&opts.Tag1, "tag1", "A", "tag of 1st database")
 	cmd.Flags().StringVar(&opts.Tag2, "tag2", "B", "tag of 2nd database")
+	cmd.Flags().StringSliceVar(&opts.TiFlashTables, "tiflash-tables", []string{}, "tables needed to wait for replication available, eg. 1:t1,1:t2")
 	cmd.Flags().IntVar(&opts.Threads, "thread", 1, "number of worker threads")
 	cmd.Flags().IntVar(&opts.QueryTimeout, "query-timeout", 30, "timeout in seconds for a singe query")
 	return cmd
