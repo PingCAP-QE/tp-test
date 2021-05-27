@@ -52,7 +52,7 @@
     T.both_parted = function() return T.count_parted + T.count_create_like == 2 end
 }
 
-init: create_table; insert_data
+init: drop table if exists t1, t2; create_table; insert_data
 
 txn: begin; rand_queries; commit
 
@@ -65,7 +65,9 @@ create_table:
 key_primary:
  |  , primary key(c_int) { T.mark_id('c_int') }
  |  , primary key(c_str) { T.mark_id('c_str') }
+ |  , primary key(c_str(8)) { T.mark_id('c_str') }
  |  , primary key(c_int, c_str) { T.mark_id('c_int_str') }
+ |  , primary key(c_int, c_str(4)) { T.mark_id('c_int_str') }
 
 key_c_int_part: | , key(c_int)
 key_c_int: [weight=2] key_c_int_part | , unique key(c_int) { T.mark_id('c_int') }

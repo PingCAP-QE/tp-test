@@ -122,7 +122,9 @@ table_part_keys:
 key_primary:
  |  , primary key(c_int) { T.mark_id('c_int') }
  |  , primary key(c_str) { T.mark_id('c_str') }
+ |  , primary key(c_str(8)) { T.mark_id('c_str') }
  |  , primary key(c_int, c_str) { T.mark_id('c_int_str') }
+ |  , primary key(c_int, c_str(4)) { T.mark_id('c_int_str') }
 key_c_int_part: | , key(c_int)
 key_c_int: [weight=2] key_c_int_part | , unique key(c_int) { T.mark_id('c_int') }
 key_c_str_part: | , key(c_str)

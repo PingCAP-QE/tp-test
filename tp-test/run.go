@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -197,9 +198,12 @@ func checkTable(ctx context.Context, db *sql.DB, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return rs.UnorderedDigest(func(i int, j int, raw []byte) bool {
-		return rs.ColumnDef(j).Type != "JSON"
-	}), nil
+	return rs.DataDigest(resultset.DigestOptions{
+		Sort: true,
+		Filter: func(i int, j int, raw []byte, _ resultset.ColumnDef) bool {
+			return rs.ColumnDef(j).Type != "JSON"
+		}},
+	), nil
 }
 
 func doStmts(ctx context.Context, opts runABTestOptions, t *Test, i int, s1 *sql.Conn, s2 *sql.Conn) error {
@@ -220,6 +224,15 @@ func doStmts(ctx context.Context, opts runABTestOptions, t *Test, i int, s1 *sql
 	}
 
 	for _, stmt := range txn {
+		if stmt.IsQuery {
+			k := numOfPlans(ctx, s1, stmt.Stmt, 99)
+			if k > 1 {
+				if err := checkEachPlan(ctx, s1, stmt.Stmt, k); err != nil {
+					return err
+				}
+				stmt.Stmt = strings.Replace(stmt.Stmt, "nth_plan(?)", "nth_plan(1)", 1)
+			}
+		}
 		ctx1, _ := context.WithTimeout(ctx, time.Duration(opts.QueryTimeout)*time.Second)
 		rs1, err1 := doStmt(ctx1, s1, stmt)
 		record(stmt.Seq, opts.Tag1, rs1, err1)
@@ -233,20 +246,17 @@ func doStmts(ctx context.Context, opts runABTestOptions, t *Test, i int, s1 *sql
 			log.Printf("skip query error: [%v] [%v] @(%s,%d)", err1, err2, t.ID, stmt.Seq)
 			continue
 		}
-		cellFilter := func(i int, j int, raw []byte) bool {
-			if strings.Contains(stmt.Stmt, "union") {
-				typ := rs1.ColumnDef(j).Type
-				return typ != "FLOAT" && typ != "DOUBLE" && typ != "DECIMAL"
-			}
-			return true
+		digestOpts := resultset.DigestOptions{
+			Sort: true,
+			Filter: func(i int, j int, raw []byte, _ resultset.ColumnDef) bool {
+				if strings.Contains(stmt.Stmt, "union") {
+					typ := rs1.ColumnDef(j).Type
+					return typ != "FLOAT" && typ != "DOUBLE"
+				}
+				return true
+			},
 		}
-		h1, h2 := "", ""
-		if q := strings.ToLower(stmt.Stmt); stmt.IsQuery && rs1.NRows() == rs2.NRows() && rs1.NRows() > 1 &&
-			(!strings.Contains(q, "order by") || strings.Contains(q, "force-unordered")) {
-			h1, h2 = rs1.UnorderedDigest(cellFilter), rs2.UnorderedDigest(cellFilter)
-		} else {
-			h1, h2 = rs1.DataDigest(cellFilter), rs2.DataDigest(cellFilter)
-		}
+		h1, h2 := rs1.DataDigest(digestOpts), rs2.DataDigest(digestOpts)
 		if h1 != h2 {
 			return fmt.Errorf("result digests mismatch @(%s,%d) %q", t.ID, stmt.Seq, stmt.Stmt)
 		}
@@ -277,4 +287,45 @@ func doStmt(ctx context.Context, s *sql.Conn, stmt Stmt) (*resultset.ResultSet, 
 
 func validateErrs(err1 error, err2 error) bool {
 	return (err1 == nil && err2 == nil) || (err1 != nil && err2 != nil)
+}
+
+func numOfPlans(ctx context.Context, c *sql.Conn, stmt string, max int) int {
+	if !strings.Contains(stmt, "nth_plan(?)") {
+		return 1
+	}
+	nth := sort.Search(max, func(i int) bool {
+		q := strings.Replace(stmt, "nth_plan(?)", "nth_plan("+strconv.Itoa(i+1)+")", 1)
+		c.ExecContext(ctx, q)
+		warnings := 0
+		c.QueryRowContext(ctx, "select @@warning_count").Scan(&warnings)
+		return warnings > 0
+	})
+	return nth
+}
+
+func checkEachPlan(ctx context.Context, c *sql.Conn, stmt string, n int) error {
+	lastStmt, lastDigest := "", ""
+	for i := 0; i < n; i++ {
+		thisStmt := strings.Replace(stmt, "nth_plan(?)", "nth_plan("+strconv.Itoa(i+1)+")", 1)
+		rows, err := c.QueryContext(ctx, thisStmt)
+		if err != nil {
+			log.Printf("%q -> %v", thisStmt, err)
+			//if strings.Contains(err.Error(), "PlanCounterTp planCounter is not handled") {
+			//	continue
+			//}
+			return err
+		}
+		rs, err := resultset.ReadFromRows(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		thisDigest := rs.DataDigest(resultset.DigestOptions{Sort: true})
+		log.Printf("%q -> %s", thisStmt, thisDigest)
+		if len(lastStmt) > 0 && lastDigest != thisDigest {
+			return fmt.Errorf("(%s:%q) != (%s:%q)", lastDigest, lastStmt, thisDigest, thisStmt)
+		}
+		lastStmt, lastDigest = thisStmt, thisDigest
+	}
+	return nil
 }

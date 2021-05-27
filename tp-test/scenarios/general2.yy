@@ -46,7 +46,7 @@
 
 }
 
-init: create_table; insert_data
+init: drop table if exists t; create_table; insert_data
 
 txn: begin; rand_queries; commit
 
@@ -69,8 +69,11 @@ create_table:
 key_primary:
  |  , primary key(c_int)
  |  , primary key(c_str)
+ |  , primary key(c_str(8))
  |  , primary key(c_int, c_str)
+ |  , primary key(c_int, c_str(4))
  |  , primary key(c_str, c_int)
+ |  , primary key(c_str(4), c_int)
 
 key_c_int:
  |  , key(c_int)
